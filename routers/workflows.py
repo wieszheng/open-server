@@ -44,11 +44,11 @@ async def get_workflow_by_test_case(
 @router.post("/{test_case_id}", response_model=schemas.WorkflowResponse)
 async def create_or_update_workflow(
     test_case_id: int,
-    data: schemas.WorkflowCreate,
+    data: schemas.FlowUpsert,
     db: AsyncSession = Depends(get_db),
 ):
     """创建或更新工作流（根据测试用例ID）"""
-    workflow = await workflow_crud.create_workflow(db, test_case_id, data)
+    workflow = await workflow_crud.upsert_flow(db, test_case_id, data)
     return workflow
 
 

@@ -110,7 +110,6 @@ class TestCaseBase(BaseModel):
     author: str = Field(default="未知", max_length=100, description="创建者")
     tags: List[str] = Field(default_factory=list, description="标签列表")
     script_id: Optional[int] = Field(None, description="关联脚本ID")
-    is_automated: bool = Field(default=False, description="是否自动化")
     is_parallel: bool = Field(default=True, description="是否可并行")
 
 
@@ -133,13 +132,13 @@ class TestCaseUpdate(BaseModel):
     author: Optional[str] = None
     tags: Optional[List[str]] = None
     script_id: Optional[int] = None
-    is_automated: Optional[bool] = None
     is_parallel: Optional[bool] = None
 
 
 class TestCaseResponse(TestCaseBase):
     """测试用例响应 schema"""
     id: int
+    is_automated: bool = False  # 只读：由工作流编排状态驱动
     total_runs: int = 0
     passed_runs: int = 0
     failed_runs: int = 0
@@ -187,7 +186,6 @@ class DirectoryResponse(DirectoryBase):
     case_count: int = 0
     is_default: bool = False
     created_at: datetime
-    updated_at: datetime
     updated_at: datetime
 
     class Config:

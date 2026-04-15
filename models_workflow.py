@@ -1,6 +1,6 @@
 """工作流/自动化编排模型"""
 from datetime import datetime
-from sqlalchemy import Column, Integer, Text, DateTime, ForeignKey, JSON
+from sqlalchemy import Column, Integer, Text, DateTime, ForeignKey, JSON, Boolean
 from sqlalchemy.orm import relationship
 
 from database import Base
@@ -12,7 +12,7 @@ class Workflow(Base):
 
     id = Column(Integer, primary_key=True, index=True)
     test_case_id = Column(Integer, ForeignKey("test_cases.id"), nullable=False, unique=True, comment="关联的测试用例ID")
-    name = Column(Text, nullable=False, comment="工作流名称")
+    name = Column(Text, nullable=True, default="", comment="工作流名称")
     description = Column(Text, default="", comment="工作流描述")
 
     # 步骤流数据（nodes 和 edges）
@@ -20,7 +20,7 @@ class Workflow(Base):
     edges = Column(JSON, default=list, comment="边列表")
 
     # 状态
-    is_enabled = Column(Integer, default=1, comment="是否启用：1-启用，0-禁用")
+    is_enabled = Column(Boolean, default=True, comment="是否启用")
     last_run_status = Column(Text, default="", comment="最后运行状态")
 
     # 统计

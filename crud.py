@@ -145,12 +145,14 @@ async def create_test_execution(
 
 
 async def get_console_stats(db: AsyncSession, days: int = 7) -> dict:
-    """获取控制台统计数据"""
-    # 获取最近 N 天的执行记录
+    """获取控制台统计数据（最近 N 天）"""
+    from datetime import timedelta
+    since = datetime.utcnow() - timedelta(days=days)
+
     result = await db.execute(
         select(TestExecution)
+        .where(TestExecution.timestamp >= since)
         .order_by(TestExecution.timestamp.desc())
-        .limit(500)
     )
     executions = list(result.scalars().all())
     
@@ -179,7 +181,7 @@ async def get_console_stats(db: AsyncSession, days: int = 7) -> dict:
         daily_data[date_str].append(e.duration)
     
     trend = []
-    for date_str in sorted(daily_data.keys(), reverse=True)[:7]:
+    for date_str in sorted(daily_data.keys(), reverse=True)[:days]:
         durations = daily_data[date_str]
         trend.append({
             "date": date_str,
@@ -262,6 +264,8 @@ async def create_test_case(db: AsyncSession, case: TestCaseCreate) -> TestCase:
     db.add(db_case)
     await db.commit()
     await db.refresh(db_case)
+    if db_case.directory_id:
+        await update_directory_case_count(db, db_case.directory_id)
     return db_case
 
 
@@ -273,6 +277,7 @@ async def update_test_case(
     if not db_case:
         return None
 
+    old_directory_id = db_case.directory_id
     update_data = case.model_dump(exclude_unset=True)
     if "tags" in update_data:
         update_data["tags"] = ",".join(update_data["tags"])
@@ -282,6 +287,15 @@ async def update_test_case(
     db_case.updated_at = datetime.utcnow()
     await db.commit()
     await db.refresh(db_case)
+
+    # 目录变更时同步更新新旧目录的计数
+    new_directory_id = db_case.directory_id
+    if old_directory_id != new_directory_id:
+        if old_directory_id:
+            await update_directory_case_count(db, old_directory_id)
+        if new_directory_id:
+            await update_directory_case_count(db, new_directory_id)
+
     return db_case
 
 
@@ -291,8 +305,11 @@ async def delete_test_case(db: AsyncSession, case_id: int) -> bool:
     if not db_case:
         return False
 
+    directory_id = db_case.directory_id
     await db.delete(db_case)
     await db.commit()
+    if directory_id:
+        await update_directory_case_count(db, directory_id)
     return True
 
 

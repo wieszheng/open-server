@@ -67,7 +67,7 @@ class TestCase(Base):
     avg_duration = Column(Float, default=0.0, comment="平均执行时长(秒)")
     
     # 标记
-    is_automated = Column("is自动化", Boolean, default=False, comment="是否自动化")
+    is_automated = Column(Boolean, default=False, comment="是否自动化")
     is_parallel = Column(Boolean, default=True, comment="是否可并行")
     flaky = Column(Boolean, default=False, comment="是否不稳定")
     

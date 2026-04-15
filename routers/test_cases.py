@@ -1,5 +1,4 @@
 """测试用例 API 路由"""
-from datetime import datetime
 from typing import List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -15,19 +14,21 @@ from crud import (
     get_test_case_stats,
 )
 from schemas import TestCaseCreate, TestCaseUpdate, TestCaseResponse
+import crud_workflow as workflow_crud
+import schemas_workflow as wf_schemas
 
 router = APIRouter(prefix="/test-cases", tags=["测试用例"])
 
 
 def convert_case_to_response(case) -> dict:
-    """转换模型为响应格式"""
+    """将 ORM 对象转换为响应字典（处理 Enum 序列化和计算字段）"""
     return {
         "id": case.id,
         "name": case.name,
         "description": case.description,
-        "case_type": case.case_type.value if hasattr(case.case_type, 'value') else case.case_type,
-        "priority": case.priority.value if hasattr(case.priority, 'value') else case.priority,
-        "status": case.status.value if hasattr(case.status, 'value') else case.status,
+        "case_type": case.case_type.value if hasattr(case.case_type, "value") else case.case_type,
+        "priority": case.priority.value if hasattr(case.priority, "value") else case.priority,
+        "status": case.status.value if hasattr(case.status, "value") else case.status,
         "module": case.module,
         "directory_id": case.directory_id,
         "preconditions": case.preconditions,
@@ -50,7 +51,9 @@ def convert_case_to_response(case) -> dict:
     }
 
 
-@router.get("", response_model=List[dict])
+# ===================== 测试用例 CRUD 接口 =====================
+
+@router.get("", response_model=List[TestCaseResponse])
 async def list_test_cases(
     skip: int = Query(0, ge=0),
     limit: int = Query(100, ge=1, le=500),
@@ -81,7 +84,7 @@ async def get_stats(db: AsyncSession = Depends(get_db)):
     return await get_test_case_stats(db)
 
 
-@router.get("/{case_id}", response_model=dict)
+@router.get("/{case_id}", response_model=TestCaseResponse)
 async def get_test_case_detail(case_id: int, db: AsyncSession = Depends(get_db)):
     """获取测试用例详情"""
     case = await get_test_case(db, case_id)
@@ -90,14 +93,14 @@ async def get_test_case_detail(case_id: int, db: AsyncSession = Depends(get_db))
     return convert_case_to_response(case)
 
 
-@router.post("", response_model=dict, status_code=201)
+@router.post("", response_model=TestCaseResponse, status_code=201)
 async def create_case(case: TestCaseCreate, db: AsyncSession = Depends(get_db)):
     """创建测试用例"""
     db_case = await create_test_case(db, case)
     return convert_case_to_response(db_case)
 
 
-@router.put("/{case_id}", response_model=dict)
+@router.put("/{case_id}", response_model=TestCaseResponse)
 async def update_case(
     case_id: int,
     case: TestCaseUpdate,
@@ -116,3 +119,33 @@ async def delete_case(case_id: int, db: AsyncSession = Depends(get_db)):
     success = await delete_test_case(db, case_id)
     if not success:
         raise HTTPException(status_code=404, detail="测试用例不存在")
+
+
+# ===================== Flow（自动化工作流）接口 =====================
+
+@router.get("/{case_id}/flow", response_model=Optional[wf_schemas.FlowResponse])
+async def get_case_flow(case_id: int, db: AsyncSession = Depends(get_db)):
+    """
+    获取测试用例的自动化工作流。
+    - 存在：返回 { nodes, edges, updated_at }
+    - 不存在：返回 null（前端按空画布处理）
+    """
+    case = await get_test_case(db, case_id)
+    if not case:
+        raise HTTPException(status_code=404, detail="测试用例不存在")
+    return await workflow_crud.get_workflow_by_test_case(db, case_id)
+
+
+@router.put("/{case_id}/flow", response_model=wf_schemas.FlowResponse)
+async def upsert_case_flow(
+    case_id: int,
+    data: wf_schemas.FlowUpsert,
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    保存测试用例的自动化工作流（不存在时创建，存在时更新）。
+    """
+    case = await get_test_case(db, case_id)
+    if not case:
+        raise HTTPException(status_code=404, detail="测试用例不存在")
+    return await workflow_crud.upsert_flow(db, case_id, data)
