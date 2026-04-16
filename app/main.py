@@ -11,6 +11,7 @@ from app.routers import (
     test_cases_router,
     directories_router,
     workflows_router,
+    run_jobs_router,
 )
 
 
@@ -49,6 +50,7 @@ app.include_router(console_router)
 app.include_router(test_cases_router)
 app.include_router(directories_router)
 app.include_router(workflows_router)
+app.include_router(run_jobs_router)
 
 
 @app.get("/")
