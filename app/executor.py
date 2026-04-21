@@ -1,7 +1,7 @@
 """
 工作流执行引擎（服务端）
 - 非设备节点：服务端直接执行
-- appUiAction 节点：触发 on_node_delegate 回调，等待本地 Agent 返回结果
+- App UI 操作节点：触发 on_node_delegate 回调，等待本地 Agent 返回结果
 """
 import re
 import time
@@ -12,8 +12,13 @@ from typing import Any, Callable
 
 _VAR_RE = re.compile(r"\{\{(\w+)\}\}")
 
-# 需要委派给本地 Agent 执行的节点类型
-DELEGATE_TYPES = {"appUiAction"}
+# 需要委派给本地 Agent 执行的节点类型（与前端 nodes.tsx APP_UI_NODE_TYPES 保持一致）
+DELEGATE_TYPES = {
+    "appUiAction",       # 旧类型，向后兼容
+    "appLaunchApp", "appClick", "appLongPress", "appDoubleClick",
+    "appType", "appClearText", "appSwipe", "appTapXy",
+    "appWaitElement", "appGetText", "appScreenshot", "appPressKey",
+}
 
 
 def _render(value: Any, ctx: dict) -> Any:

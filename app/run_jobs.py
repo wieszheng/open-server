@@ -3,7 +3,7 @@ RunJob 内存存储 + SSE 事件总线
 
 create_job_and_run 创建 job 并立即后台执行。
 遇到 appUiAction 等委派节点时，暂停并等待浏览器调用 /node-result 回传结果后继续。
-执行完成后将结果持久化到数据库。
+执行完成后将结果（含截图 base64）持久化到 test_executions 表，支持历史查询。
 """
 import asyncio
 import time
@@ -35,12 +35,13 @@ async def _push(job: dict, event: dict):
 
 
 async def _persist(job: dict, result: dict, node_results: list[dict], started_at: float):
-    """将执行结果写入数据库，更新用例和工作流统计。"""
+    """将执行结果写入数据库（upsert：每个用例只保留最新一次执行）。"""
     from app.database import async_session_maker
     from app.models.test_execution import TestExecution
     from app.models.test_case import TestCase
     from app.models.workflow import Workflow
     from sqlalchemy import select
+    from sqlalchemy.orm.attributes import flag_modified
 
     duration = time.perf_counter() - started_at
     test_case_id: int = job["test_case_id"]
@@ -50,17 +51,21 @@ async def _persist(job: dict, result: dict, node_results: list[dict], started_at
     now = datetime.now(timezone.utc)
 
     async with async_session_maker() as session:
-        # 1. 写 TestExecution 记录
-        execution = TestExecution(
-            timestamp=now,
-            duration=duration,
-            total_cases=total,
-            passed_cases=passed,
-            failed_cases=failed,
-            test_case_id=test_case_id,
-            node_results=node_results,
+        # 1. Upsert TestExecution：按 test_case_id 查找，存在则覆盖，否则新建
+        existing = await session.execute(
+            select(TestExecution).where(TestExecution.test_case_id == test_case_id)
         )
-        session.add(execution)
+        execution = existing.scalars().first()   # 用 first() 兼容旧数据可能存在的重复行
+        if execution is None:
+            execution = TestExecution(test_case_id=test_case_id)
+            session.add(execution)
+        execution.timestamp = now
+        execution.duration = duration
+        execution.total_cases = total
+        execution.passed_cases = passed
+        execution.failed_cases = failed
+        execution.node_results = node_results
+        flag_modified(execution, "node_results")  # JSON 列必须显式标记，否则 SQLAlchemy 不检测变更
 
         # 2. 更新 TestCase 统计
         tc = await session.get(TestCase, test_case_id)
@@ -71,7 +76,6 @@ async def _persist(job: dict, result: dict, node_results: list[dict], started_at
             else:
                 tc.failed_runs += 1
             tc.last_run_time = now
-            # 滚动平均耗时
             prev_avg = tc.avg_duration or 0.0
             tc.avg_duration = round(
                 (prev_avg * (tc.total_runs - 1) + duration) / tc.total_runs, 3
@@ -101,12 +105,24 @@ async def _run_flow_bg(job: dict, flow: dict):
             await _push(job, {"type": "node_start", "node_id": node_id, "label": label})
 
         async def on_done(node_id: str, label: str, success: bool, message: str, duration: float):
+            # delegate 节点已在 on_delegate 中追加过，跳过避免重复
+            if any(r["node_id"] == node_id for r in node_results):
+                await _push(job, {
+                    "type": "node_done",
+                    "node_id": node_id,
+                    "label": label,
+                    "success": success,
+                    "message": message,
+                    "duration": duration,
+                })
+                return
             node_results.append({
                 "node_id": node_id,
                 "label": label,
                 "success": success,
                 "message": message,
                 "duration": round(duration, 4),
+                "screenshot": None,
             })
             await _push(job, {
                 "type": "node_done",
@@ -131,8 +147,25 @@ async def _run_flow_bg(job: dict, flow: dict):
 
             try:
                 await asyncio.wait_for(ev.wait(), timeout=120.0)
-                return result.get("success", False), result.get("message", ""), result.get("duration", 0.0)
+                r = result
+                node_results.append({
+                    "node_id": node_id,
+                    "label": label,
+                    "success": r.get("success", False),
+                    "message": r.get("message", ""),
+                    "duration": round(r.get("duration", 0.0), 4),
+                    "screenshot": r.get("screenshot"),   # base64 data URL or None
+                })
+                return r.get("success", False), r.get("message", ""), r.get("duration", 0.0)
             except asyncio.TimeoutError:
+                node_results.append({
+                    "node_id": node_id,
+                    "label": label,
+                    "success": False,
+                    "message": "等待本地 Agent 超时（120s）",
+                    "duration": 120.0,
+                    "screenshot": None,
+                })
                 return False, "等待本地 Agent 超时（120s）", 120.0
             finally:
                 job.pop("pending_delegation", None)
@@ -144,7 +177,7 @@ async def _run_flow_bg(job: dict, flow: dict):
             on_node_delegate=on_delegate,
         )
 
-        # 持久化
+        # 持久化到 DB（upsert）
         await _persist(job, result, node_results, started_at)
 
         await _push(job, {
@@ -158,7 +191,7 @@ async def _run_flow_bg(job: dict, flow: dict):
         await _push(job, {"type": "error", "node_id": None, "message": str(exc)})
 
 
-def create_job_and_run(test_case_id: int, flow: dict) -> str:
+def create_job_and_run(test_case_id: int, flow: dict, case_name: str = "") -> str:
     job_id = str(uuid.uuid4())
     job = {
         "id": job_id,
@@ -174,7 +207,10 @@ def create_job_and_run(test_case_id: int, flow: dict) -> str:
     return job_id
 
 
-def resolve_delegation(job_id: str, node_id: str, success: bool, message: str, duration: float) -> bool:
+def resolve_delegation(
+    job_id: str, node_id: str, success: bool, message: str, duration: float,
+    screenshot: str | None = None,
+) -> bool:
     """浏览器回传本地 Agent 执行结果，恢复暂停的执行引擎。"""
     job = get_job(job_id)
     if job is None:
@@ -182,30 +218,36 @@ def resolve_delegation(job_id: str, node_id: str, success: bool, message: str, d
     delegation = job.get("pending_delegation")
     if delegation is None or delegation["node_id"] != node_id:
         return False
-    delegation["result"].update({"success": success, "message": message, "duration": duration})
+    delegation["result"].update({
+        "success": success,
+        "message": message,
+        "duration": duration,
+        "screenshot": screenshot,
+    })
     delegation["event"].set()
     return True
 
 
 async def stream_events(job_id: str):
+    """异步生成器：先回放历史事件，再实时推送新事件。"""
     job = get_job(job_id)
     if job is None:
-        yield {"type": "error", "message": "job not found"}
         return
 
+    # 先回放已有事件
     for ev in list(job["events"]):
         yield ev
-        if ev.get("type") in ("complete", "error"):
-            return
+
+    # 如果已完成/错误就不再等待
+    if job["status"] in ("done", "error"):
+        return
 
     q: asyncio.Queue = job["queue"]
     while True:
         try:
-            event = await asyncio.wait_for(q.get(), timeout=60.0)
+            ev = await asyncio.wait_for(q.get(), timeout=30)
+            yield ev
+            if ev.get("type") in ("complete", "error"):
+                break
         except asyncio.TimeoutError:
             yield {"type": "heartbeat"}
-            continue
-        yield event
-        if event.get("type") in ("complete", "error"):
-            break
-
